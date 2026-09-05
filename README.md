@@ -1,7 +1,15 @@
 # cos-updater
 
-基于腾讯云 COS 的极简 Go 程序自更新库：检查新版本 → 下载 → SHA256 校验 → 安装到独立版本文件 → 旧程序改名 .old（不隐藏、可回滚）→ 关闭旧程序并启动新版本。
+基于腾讯云 COS 的极简 Go 程序自更新库：检查新版本 → 下载 → SHA256 校验 → 退役旧程序（改名 `.old`）→ 落位**固定名**新程序 → 关闭旧程序并自动启动新版本。
 为 SyncLedger 等本地项目而建，亦可用于任何 Go 程序。
+
+## 核心原则：固定名入口，程序名永远不变
+
+- 无论怎么升级，本地程序文件名始终是**固定名**（如 `合洋泰销售提成分析工具.exe`），COS 产物同名、不带版本号。
+- 磁盘上只保留两种文件：**当前新版**（固定名）+ **历史备份**（`固定名.old-<时间戳>`）。
+  每次更新都把旧固定名改名为 `.old-<时间戳>`（保留多份、可见、可回滚、双击不可运行、不加隐藏属性），再落位新版本到固定名。
+- 连续更新不会产生 `工具_v1.0.6_v1.0.7.exe` 这类嵌套名：`NextExecutablePath` 会剥离基准名里的 `_v<版本>` 后缀。
+- Windows 上运行中的 exe 只能重命名、不能覆盖/删除，因此「先退役旧固定名 → 再落位新固定名」的顺序由库内部保证，调用方无需关心。
 
 ## 安装
 
@@ -54,10 +62,10 @@ func main() {
 		return
 	}
 
+	// ApplyUpdate 已在库内自动完成「退役旧程序(.old) → 落位固定名」，此处直接启动新版本并退出旧进程。
 	log.Printf("更新成功，启动新版 %s", newPath)
-	cosupdater.Retire(os.Executable()) // 旧程序改名 .old，不再被双击运行（不加隐藏属性）
-	cosupdater.Restart(newPath)        // 启动带版本号的新文件
-	os.Exit(0)                         // 退出当前(旧)进程
+	cosupdater.Restart(newPath) // 启动固定名新程序
+	os.Exit(0)                  // 退出当前(旧)进程
 }
 ```
 
@@ -68,6 +76,7 @@ func main() {
 
 platforms 必需，key 为 GOOS/GOARCH；每个平台条目必须含 download_url（**相对桶根的路径**，
 含 Prefix；或绝对 URL——绝对 URL 仅公有读模式允许）与 checksum（强制，格式 sha256:<64位十六进制>）。
+`download_url` 指向的产物文件名即程序固定名（不带版本号）。
 
 ```json
 {
@@ -75,11 +84,11 @@ platforms 必需，key 为 GOOS/GOARCH；每个平台条目必须含 download_ur
   "release_notes": "修复了 6 月账单导出的合计行错误",
   "platforms": {
     "windows/amd64": {
-      "download_url": "AutoPddTax/2.0.0/windows/amd64/xxxx.exe",
+      "download_url": "AutoPddTax/2.0.0/windows/amd64/AutoPddTax.exe",
       "checksum": "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
     },
     "linux/amd64": {
-      "download_url": "AutoPddTax/2.0.0/linux/amd64/syncledger-linux",
+      "download_url": "AutoPddTax/2.0.0/linux/amd64/AutoPddTax",
       "checksum": "sha256:fedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321"
     }
   }
@@ -100,11 +109,11 @@ Get-FileHash .\xxx.exe -Algorithm SHA256   # Windows PowerShell
 | 函数 | 说明 |
 |---|---|
 | `CheckUpdate(ctx, cfg) (has bool, info *VersionInfo, err error)` | 检查是否有新版本；版本相同或更低返回 has=false，info 仍携带解析结果可供展示 |
-| `ApplyUpdate(ctx, cfg, info) (newPath string, err error)` | 下载 → 强制 SHA256 校验 → 安装到「原程序同目录、带版本号的独立文件」（如 `app_v1.0.3.exe`），返回新程序路径。本函数不改动运行中的原程序（退役改为 .old 交给 `Retire`）；失败时原文件保留、临时文件清理 |
+| `ApplyUpdate(ctx, cfg, info) (newPath string, err error)` | 下载 → 强制 SHA256 校验 → 退役旧运行程序（改名为 `<固定名>.old-<时间戳>`，保留多份备份）→ 新版本落位到**固定名** → 返回固定名路径。退役/落位顺序由库内保证，调用方无须关心 Windows 约束；失败时原程序保留、临时文件清理 |
 | `RunUpdate(ctx, cfg) error` | CheckUpdate + ApplyUpdate 的静默组合（丢弃返回路径）；无新版本时返回 nil |
-| `NextExecutablePath(cfg, info)` | 计算新版将要安装到的路径（含 `_v{版本}` 文件名），供确认弹窗展示 |
-| `CleanupOldVersions(currentPath, keep)` | 清理同目录历史版本文件，只保留版本最高的 keep 个（建议 2）；当前运行文件与固定名文件不删 |
-| `Retire(path string) (oldPath string, err error)` | 把正在运行的旧程序改名为同目录 `<原名>.old`：可见、可回滚、双击不再运行，且不加隐藏属性；已存在同名 .old 先删除。失败不影响更新主流程（可忽略） |
+| `NextExecutablePath(cfg, info)` | 计算新版将要安装到的**固定名**路径（剥掉基准名里的 `_v<版本>` 后缀，程序名永不变、连续更新不嵌套），供确认弹窗展示 |
+| `CleanupOldVersions(currentPath, keep)` | 清理同目录「带 `_v<版本>` 后缀」的历史文件。固定名模式下磁盘不再积累这类文件，此函数基本用不到，保留用于兼容旧版本 |
+| `Retire(path string) (oldPath string, err error)` | 把正在运行的旧程序改名为同目录 `<原名>.old-<时间戳>`：文件名唯一（同名冲突自动递增后缀）、保留多份、可见、可回滚、双击不再运行、不加隐藏属性。已由 `ApplyUpdate` 内落位前自动调用；公开可单独复用 |
 | `Restart(path ...string) error` | 重启让更新生效。传新版本路径；为空时用 os.Executable()。Windows 安排延迟启动后返回，Unix 替换进程映像且不返回 |
 | `info.AssetForPlatform(goos, arch)` | 预检 platforms 中是否有指定平台的产物，便于更新前预判 |
 | `Publish(ctx, PublishConfig, []PublishAsset) error` | 发布端：上传产物 + 自动算校验和 + 生成上传 version.json。**先产物后 version.json**，避免旧客户端拉到 404 |
@@ -138,7 +147,7 @@ cosup-publish \
   -bucket https://xxxxx.com \
   -prefix AutoPddTax -version 2.0.0 \
   -secret-id $COS_SECRET_ID -secret-key $COS_SECRET_KEY \
-  -asset "windows/amd64=dist/xxxx.exe" \
+  -asset "windows/amd64=dist/AutoPddTax.exe" \
   -note "发行说明"
 ```
 
@@ -162,5 +171,3 @@ type PublishConfig struct {
 }
 err := cosupdater.Publish(ctx, cfg, []cosupdater.PublishAsset{{GOOS: "windows", GOARCH: "amd64", FilePath: "dist/app.exe"}})
 ```
-
-

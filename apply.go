@@ -11,14 +11,18 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/hashicorp/go-version"
 )
 
-// NextExecutablePath 计算本次更新将要安装到的本地新程序路径。
+// NextExecutablePath 计算本次更新将要安装到的本地程序路径。
 //
 // 规则：与当前运行程序（cfg.TargetPath，为空时取 os.Executable()）同目录，
-// 文件名为「原名去掉扩展名 + _v + 版本号 + 原扩展名」，如
-// "合洋泰销售提成分析工具_v1.0.3.exe"。版本号中的前导 'v' 会被去除，
-// 避免出现 "_vv1.0.3" 这类双 v 文件名。返回绝对路径。
+// 文件名为「稳定固定名」——即「原名剥掉 _v<版本> 后缀 + 原扩展名」，如
+// "合洋泰销售提成分析工具.exe"。基准名本身可能带版本号（如旧版残留的
+// "合洋泰销售提成分析工具_v1.0.6.exe"），会被剥掉，保证程序名永远不变、
+// 连续更新不会产生 "…_v1.0.6_v1.0.7.exe" 这类嵌套名。返回绝对路径。
+// info 参数保留仅用于签名兼容：固定名不再包含版本号。
 func NextExecutablePath(cfg *Config, info *VersionInfo) (string, error) {
 	targetPath := cfg.TargetPath
 	if targetPath == "" {
@@ -31,9 +35,14 @@ func NextExecutablePath(cfg *Config, info *VersionInfo) (string, error) {
 	dir := filepath.Dir(targetPath)
 	base := filepath.Base(targetPath)
 	ext := filepath.Ext(base)
-	nameNoExt := strings.TrimSuffix(base, ext)
-	ver := strings.TrimPrefix(strings.TrimSpace(info.Version), "v")
-	return filepath.Join(dir, fmt.Sprintf("%s_v%s%s", nameNoExt, ver, ext)), nil
+	stem := strings.TrimSuffix(base, ext)
+	// 剥掉带版本号后缀（如 "_v1.0.6"），得到稳定基础名，修复连续更新嵌套。
+	if i := strings.LastIndex(stem, "_v"); i >= 0 {
+		if _, err := version.NewVersion(stem[i+2:]); err == nil {
+			stem = stem[:i]
+		}
+	}
+	return filepath.Join(dir, stem+ext), nil
 }
 
 // ApplyUpdate 执行一次完整更新：下载 -> SHA256 校验 -> 安装到同目录独立版本文件。
@@ -97,16 +106,16 @@ func ApplyUpdate(ctx context.Context, cfg *Config, info *VersionInfo) (string, e
 		return "", err
 	}
 
-	// 安装到新路径。同版本文件可能已存在（重装），Windows 上 rename 到已存在目标会
-	// 失败，故先尝试删除旧目标再落位。运行中的原程序（不带版本号）不受影响。
-	if err := os.Rename(tmpName, newPath); err != nil {
-		if rmErr := os.Remove(newPath); rmErr == nil {
-			if err2 := os.Rename(tmpName, newPath); err2 != nil {
-				return "", fmt.Errorf("安装新版本失败: %w", err2)
-			}
-		} else {
-			return "", fmt.Errorf("安装新版本失败: %w", err)
+	// 安装到固定名。目标固定名可能正在运行（Windows 上运行中的 exe 不能被覆盖/删除，
+	// 只能改名），故必须先把它退役成 ".old-<时间戳>" 腾出名字，再落位新版本。这一步
+	// 内部调用 Retire，会保留多份历史备份、不隐藏。失败表示退役或落位不成功，原程序仍在。
+	if _, err := os.Stat(newPath); err == nil {
+		if _, rerr := Retire(newPath); rerr != nil {
+			return "", rerr
 		}
+	}
+	if err := os.Rename(tmpName, newPath); err != nil {
+		return "", fmt.Errorf("安装新版本失败: %w", err)
 	}
 	replaced = true
 

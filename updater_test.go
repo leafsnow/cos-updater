@@ -202,9 +202,9 @@ func TestApplyUpdateFullFlow(t *testing.T) {
 		t.Fatalf("ApplyUpdate 报错: %v", err)
 	}
 
-	// 新方案：新版安装到带版本号的独立文件，原程序保持不动、不隐藏。
-	if want := filepath.Join(filepath.Dir(target), "合洋泰对账系统_v2.0.0.exe"); newPath != want {
-		t.Fatalf("新程序路径预期 %s，得到 %s", want, newPath)
+	// 固定名入口：新版本落位到固定名，程序名不变、不带 _v 版本号。
+	if want := filepath.Join(filepath.Dir(target), "合洋泰对账系统.exe"); newPath != want {
+		t.Fatalf("新程序路径预期固定名 %s，得到 %s", want, newPath)
 	}
 	got, err := os.ReadFile(newPath)
 	if err != nil {
@@ -213,10 +213,13 @@ func TestApplyUpdateFullFlow(t *testing.T) {
 	if string(got) != string(bin) {
 		t.Fatal("新版本文件内容应与下载内容一致")
 	}
-	// 原程序不被替换、不被改名。
-	orig, _ := os.ReadFile(target)
-	if string(orig) != "old-binary" {
-		t.Fatal("原程序文件不应被改动（不替换、不隐藏）")
+	// 旧程序被退役成 <固定名>.old-<时间戳> 备份（可见、可回滚、不隐藏），固定名现在是新版。
+	old, err := findOldBackup(t, filepath.Dir(target), filepath.Base(target))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(old); string(b) != "old-binary" {
+		t.Fatalf("退役备份内容应为 old-binary，得到 %q", string(b))
 	}
 	// Windows 上可执行位无意义，Unix 上由库保证 0755。
 	if runtime.GOOS != "windows" {
@@ -379,9 +382,16 @@ func TestPrivateBucketSignedRequests(t *testing.T) {
 	if err != nil || string(got) != string(bin) {
 		t.Fatalf("私有读更新结果不正确: %v", err)
 	}
-	// 原程序文件保持原样、不被替换。
-	if orig, _ := os.ReadFile(cfg.TargetPath); string(orig) != "old" {
-		t.Fatal("私有读更新后原程序文件不应被改动")
+	// 固定名落位：newPath 即 TargetPath；旧程序被退役成 <固定名>.old-<时间戳> 备份。
+	if newPath != cfg.TargetPath {
+		t.Fatalf("固定名落位后 newPath 应为 TargetPath，得到 %s", newPath)
+	}
+	old, err := findOldBackup(t, filepath.Dir(cfg.TargetPath), filepath.Base(cfg.TargetPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(old); string(b) != "old" {
+		t.Fatalf("退役备份内容应为 old，得到 %q", string(b))
 	}
 }
 

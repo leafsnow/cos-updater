@@ -1,6 +1,7 @@
 package cosupdater
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,26 +9,27 @@ import (
 )
 
 func TestNextExecutablePath(t *testing.T) {
-	cfg := &Config{TargetPath: filepath.Join("D:", "app", "合洋泰软件.exe")}
-	cases := []struct{ ver string }{
-		{"1.0.3"},
-		{"v2.0.0"}, // 前导 v 应被去除，避免 _vv2.0.0
+	// 固定名入口：程序名永远不变，不追加 _v 版本号。
+	got, err := NextExecutablePath(&Config{TargetPath: filepath.Join("D:", "app", "合洋泰软件.exe")}, &VersionInfo{Version: "1.0.3"})
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, c := range cases {
-		got, err := NextExecutablePath(cfg, &VersionInfo{Version: c.ver})
-		if err != nil {
-			t.Fatal(err)
-		}
-		want := filepath.Join("D:", "app", "合洋泰软件_v"+strings.TrimPrefix(c.ver, "v")+".exe")
-		if got != want {
-			t.Fatalf("ver=%s 期望 %s，得到 %s", c.ver, want, got)
+	if want := filepath.Join("D:", "app", "合洋泰软件.exe"); got != want {
+		t.Fatalf("期望固定名 %s，得到 %s", want, got)
+	}
+
+	// 基准名本身带版本号（旧版残留 / 连续更新）：应剥掉，不产生嵌套。
+	for _, base := range []string{"合洋泰软件_v1.0.6.exe", "合洋泰软件_v2.0.0.exe"} {
+		got, _ := NextExecutablePath(&Config{TargetPath: filepath.Join("D:", "app", base)}, &VersionInfo{Version: "1.0.7"})
+		if want := filepath.Join("D:", "app", "合洋泰软件.exe"); got != want {
+			t.Fatalf("base=%s 期望固定名 %s，得到 %s", base, want, got)
 		}
 	}
 
-	// 原扩展名被保留；无扩展名时版本号直接追加。
-	got, _ := NextExecutablePath(&Config{TargetPath: filepath.Join("srv", "bin", "tool")}, &VersionInfo{Version: "1.0.0"})
-	if want := filepath.Join("srv", "bin", "tool_v1.0.0"); got != want {
-		t.Fatalf("无扩展名场景期望 %s，得到 %s", want, got)
+	// 无扩展名：固定名同样保留原扩展名（此处为空）。
+	got, _ = NextExecutablePath(&Config{TargetPath: filepath.Join("srv", "bin", "tool")}, &VersionInfo{Version: "1.0.1"})
+	if want := filepath.Join("srv", "bin", "tool"); got != want {
+		t.Fatalf("无扩展名场景期望固定名 %s，得到 %s", want, got)
 	}
 }
 
@@ -88,10 +90,11 @@ func TestRetire(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Retire 报错: %v", err)
 	}
-	if want := exe + ".old"; old != want {
-		t.Fatalf("期望退役路径 %s，得到 %s", want, old)
+	// 退役名应为 <原名>.old-<时间戳>，其中扩展名 .exe 保留，末尾 .old-* 使双击不可运行。
+	if !strings.HasPrefix(filepath.Base(old), "合洋泰销售提成分析工具.exe.old-") {
+		t.Fatalf("退役名应形如 <原名>.old-<时间戳>，得到 %s", old)
 	}
-	// 原文件被改名，.old 存在且内容一致。
+	// 原文件被改名，退役备份存在且内容一致。
 	assertFileExists(t, exe, false)
 	assertFileExists(t, old, true)
 	if b, _ := os.ReadFile(old); string(b) != "old-binary" {
@@ -99,23 +102,47 @@ func TestRetire(t *testing.T) {
 	}
 }
 
-func TestRetireRemovesPreviousOld(t *testing.T) {
+func TestRetireKeepsMultiple(t *testing.T) {
 	dir := t.TempDir()
 	exe := filepath.Join(dir, "app.exe")
-	prevOld := exe + ".old"
-	if err := os.WriteFile(exe, []byte("new"), 0644); err != nil {
+	if err := os.WriteFile(exe, []byte("first"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(prevOld, []byte("stale"), 0644); err != nil {
+	old1, err := Retire(exe)
+	if err != nil {
+		t.Fatalf("首次 Retire 报错: %v", err)
+	}
+	// 重新原地放一个"第二版"，再次退役：应生成新备份，且不覆盖第一版。
+	if err := os.WriteFile(exe, []byte("second"), 0644); err != nil {
 		t.Fatal(err)
 	}
-
-	if _, err := Retire(exe); err != nil {
-		t.Fatalf("Retire 报错: %v", err)
+	old2, err := Retire(exe)
+	if err != nil {
+		t.Fatalf("再次 Retire 报错: %v", err)
 	}
-	// 旧的 .old 被清除，改名后的 .old 才是当前退役件。
-	if b, _ := os.ReadFile(prevOld); string(b) != "new" {
-		t.Fatalf("改名后 .old 内容应为 new，得到 %q", string(b))
+	if old1 == old2 {
+		t.Fatalf("两次退役应产生不同备份名：%s", old1)
+	}
+	if b, _ := os.ReadFile(old1); string(b) != "first" {
+		t.Fatalf("第一份备份内容应为 first，得到 %q", string(b))
+	}
+	if b, _ := os.ReadFile(old2); string(b) != "second" {
+		t.Fatalf("第二份备份内容应为 second，得到 %q", string(b))
 	}
 	assertFileExists(t, exe, false)
+	assertFileExists(t, old1, true)
+	assertFileExists(t, old2, true)
+}
+
+// findOldBackup 在 dir 下查找 base 唯一的 ".old-<时间戳>" 备份，返回其路径。
+func findOldBackup(t *testing.T, dir, base string) (string, error) {
+	t.Helper()
+	matches, err := filepath.Glob(filepath.Join(dir, base+".old-*"))
+	if err != nil {
+		return "", err
+	}
+	if len(matches) != 1 {
+		return "", fmt.Errorf("期望恰好一个 .old 备份，得到 %d 个: %v", len(matches), matches)
+	}
+	return matches[0], nil
 }

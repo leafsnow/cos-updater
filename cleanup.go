@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/hashicorp/go-version"
 )
@@ -79,17 +80,18 @@ func CleanupOldVersions(currentPath string, keep int) error {
 	return nil
 }
 
-// Retire 把正在运行的旧程序（path，通常取 os.Executable()，即更新前双击运行的那个固定名
-// exe 或带版本号 exe）重命名为同目录下的 `<原名>.old`：文件仍可见、可回滚，但不能被双击
-// 运行，作为「老程序不隐藏」的落地方案——只改名，不再像 go-update 那样加隐藏属性。
+// Retire 把正在运行的旧程序（path，通常取 os.Executable()）改名为同目录下的
+// `<原名>.old-<时间戳>`：文件仍可见、可回滚、不能被双击运行，且不加隐藏属性。
+// 时间戳精确到秒，配合冲突递增后缀，保证多次退役生成的备份名彼此唯一、互不覆盖，
+// 从而保留多份历史版本（连续更新可回滚到任意一版）。
 //
 // Windows 允许重命名正在运行的 exe（只是不能覆盖/删除它），因此可在当前进程退出前调用。
 // 顺序：退役旧程序 -> 启动新版本（Restart）-> 退出当前进程。
 //
 // 规则：
-//   - 若 `<原名>.old` 已存在（多次退役），先删除旧的再改名，避免同名堆积；
+//   - 始终生成新名（不与已有备份冲突），不删除任何已有备份；
 //   - 返回退役后的新路径；失败返回 error，调用方可选择忽略——退役只是「可回滚标记」，
-//     不阻断更新主流程（新版本已安装在独立文件上）。
+//     不阻断更新主流程（新版本已安装到固定名上）。
 func Retire(path string) (string, error) {
 	if path == "" {
 		var err error
@@ -98,11 +100,13 @@ func Retire(path string) (string, error) {
 			return "", fmt.Errorf("获取当前程序路径失败: %w", err)
 		}
 	}
-	old := path + ".old"
-	if _, err := os.Stat(old); err == nil {
-		if rmErr := os.Remove(old); rmErr != nil {
-			return "", fmt.Errorf("清理旧退役文件 %s 失败: %w", old, rmErr)
+	stamp := time.Now().Format("20060102-150405")
+	old := fmt.Sprintf("%s.old-%s", path, stamp)
+	for i := 1; ; i++ {
+		if _, err := os.Stat(old); os.IsNotExist(err) {
+			break
 		}
+		old = fmt.Sprintf("%s.old-%s_%d", path, stamp, i)
 	}
 	if err := os.Rename(path, old); err != nil {
 		return "", fmt.Errorf("退役旧版本（改名 .old）失败: %w", err)
