@@ -26,7 +26,9 @@ func cosObjectURL(bucketURL, objectKey, secretID, secretKey string, now time.Tim
 // 客户端下载走 GET；发布上传走 PUT（COS 的预签名 URL 会按方法校验签名，
 // 二者共享同一套 q-sign-* 计算，仅 httpString 中的方法行不同）。
 func cosObjectURLMethod(method, bucketURL, objectKey, secretID, secretKey string, now time.Time) (string, error) {
-	escapedKey := escapeCosKey(strings.TrimLeft(objectKey, "/"))
+	// rawKey：URL 解码后的原始路径，用于签名；escapedKey：URL 编码后的路径，用于请求 URL。
+	rawKey := strings.TrimLeft(objectKey, "/")
+	escapedKey := escapeCosKey(rawKey)
 	fileURL := strings.TrimRight(bucketURL, "/") + "/" + escapedKey
 	switch {
 	case secretID == "" && secretKey == "":
@@ -39,7 +41,10 @@ func cosObjectURLMethod(method, bucketURL, objectKey, secretID, secretKey string
 	signKey := hmacSha1Hex(secretKey, keyTime)
 	// 未对任何 header 与 query 参数签名，故两个列表均为空；
 	// 签名对象仅覆盖方法、对象路径与时间戳。COS 签名要求方法用小写。
-	httpString := strings.ToLower(method) + "\n/" + escapedKey + "\n\n\n"
+	// UriPathname 必须用 URL 解码后的原始字节 rawKey（含中文/空格用原文），
+	// 而非 URL 编码后的 escapedKey——否则非 ASCII 对象键的 sha1(HttpString) 与
+	// COS 用解码字节算出的不一致，会得到 403 SignatureDoesNotMatch。
+	httpString := strings.ToLower(method) + "\n/" + rawKey + "\n\n\n"
 	stringToSign := "sha1\n" + keyTime + "\n" + sha1Hex(httpString) + "\n"
 	signature := hmacSha1Hex(signKey, stringToSign)
 

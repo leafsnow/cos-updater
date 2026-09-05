@@ -45,6 +45,13 @@ type PublishConfig struct {
 	// Version 本次发布的版本号，写入 version.json 的 version 字段。
 	Version string
 
+	// FlatLayout 产物路径是否不带版本子目录。
+	// false（默认）：上传到 {Prefix}/{Version}/{GOOS}/{GOARCH}/{文件名}；
+	// true：上传到 {Prefix}/{GOOS}/{GOARCH}/{文件名}（单 key 覆盖，桶只留最新，
+	//       不保留历史、不可按版本回滚）。flat 下存在「产物先覆盖、manifest 后更新」的
+	//       短竞态，靠客户端校验失败重试兜底。
+	FlatLayout bool
+
 	// ReleaseNotes 发行说明，可选。
 	ReleaseNotes string
 
@@ -79,11 +86,12 @@ func (c *PublishConfig) validate() error {
 // 顺序保证：先上传全部产物、最后上传 version.json——JSON 里写的 checksum
 // 指向产物，先传 JSON 会让旧版本客户端拿到指向 404 的下载地址（与 README 一致）。
 //
-//  1. 对每个产物计算 SHA256 并上传到 {Prefix}/{Version}/{文件名}；
+//  1. 对每个产物计算 SHA256 并上传，路径见 assetKey（含 {GOOS}/{GOARCH} 平台段）；
 //  2. 生成 version.json（version / release_notes / platforms，含 checksum）；
 //  3. 上传 version.json 到 {Prefix}/version.json。
 //
-// 产物路径以版本子目录存放，避免同名产物在多版本间覆盖。ctx 可取消上传。
+// 产物路径以平台子目录（{GOOS}/{GOARCH}）存放，避免多平台同名产物相互覆盖；
+// FlatLayout 为 true 时改用 {Prefix}/{GOOS}/{GOARCH}/{文件名}，不含版本段。ctx 可取消上传。
 func Publish(ctx context.Context, cfg PublishConfig, assets []PublishAsset) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -108,7 +116,7 @@ func Publish(ctx context.Context, cfg PublishConfig, assets []PublishAsset) erro
 			return fmt.Errorf("产物 %s 不可读: %w", a.FilePath, err)
 		}
 		base := filepath.Base(a.FilePath)
-		objectKey := joinObjKey(cfg.Prefix, cfg.Version, base)
+		objectKey := cfg.assetKey(a, base)
 
 		sum, err := fileSHA256(a.FilePath)
 		if err != nil {
@@ -134,6 +142,17 @@ func Publish(ctx context.Context, cfg PublishConfig, assets []PublishAsset) erro
 	}
 	versionKey := joinObjKey(cfg.Prefix, "version.json")
 	return uploadBytesToBucket(ctx, cfg, versionKey, data)
+}
+
+// assetKey 计算单个产物在桶内的对象键。
+// 默认布局：{Prefix}/{Version}/{GOOS}/{GOARCH}/{文件名}；
+// FlatLayout 布局：{Prefix}/{GOOS}/{GOARCH}/{文件名}。
+// 平台段（{GOOS}/{GOARCH}）用两层目录隔离，避免不同平台同名产物相互覆盖。
+func (c *PublishConfig) assetKey(a PublishAsset, base string) string {
+	if c.FlatLayout {
+		return joinObjKey(c.Prefix, a.GOOS, a.GOARCH, base)
+	}
+	return joinObjKey(c.Prefix, c.Version, a.GOOS, a.GOARCH, base)
 }
 
 // joinObjKey 拼接对象键，忽略空段与首尾斜杠（产物按版本子目录、版本文件固定位置）。

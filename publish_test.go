@@ -102,9 +102,9 @@ func TestPublishUploadsArtifactsThenManifest(t *testing.T) {
 		t.Fatalf("Publish 报错: %v", err)
 	}
 
-	// 产物按 Prefix/Version/文件名 落位
-	winKey := "AutoPddTax/2.0.0/合洋泰拼多多对账分析系统.exe"
-	linuxKey := "AutoPddTax/2.0.0/app-linux"
+	// 产物按 Prefix/Version/GOOS/GOARCH/文件名 落位（含平台段，避免不同平台同名覆盖）
+	winKey := "AutoPddTax/2.0.0/windows/amd64/合洋泰拼多多对账分析系统.exe"
+	linuxKey := "AutoPddTax/2.0.0/linux/amd64/app-linux"
 	if got, ok := store.get(winKey); !ok || string(got) != string(fakeBinary(100)) {
 		t.Fatalf("Windows 产物未正确上传")
 	}
@@ -154,8 +154,47 @@ func TestPublishUploadOrderProductBeforeManifest(t *testing.T) {
 		t.Fatalf("期望上传 2 个对象（产物 + version.json），实际 %d: %v", len(keys), keys)
 	}
 	// 先上传产物，后上传 version.json——避免客户端先读到指向 404 的 download_url
-	if keys[0] != "AutoPddTax/1.0.0/app.exe" || keys[1] != "AutoPddTax/version.json" {
+	if keys[0] != "AutoPddTax/1.0.0/windows/amd64/app.exe" || keys[1] != "AutoPddTax/version.json" {
 		t.Fatalf("上传顺序不正确: %v", keys)
+	}
+}
+
+func TestPublishFlatLayout(t *testing.T) {
+	bucket, store := newPublishCOS(t)
+	winExe := writeTemp(t, "app.exe", fakeBinary(50))
+
+	cfg := PublishConfig{
+		BucketURL: bucket, Prefix: "AutoPddTax", Version: "2.0.0",
+		FlatLayout: true, SecretID: "id", SecretKey: "key",
+	}
+	if err := Publish(context.Background(), cfg, []PublishAsset{
+		{GOOS: "windows", GOARCH: "amd64", FilePath: winExe},
+	}); err != nil {
+		t.Fatalf("Publish(-flat) 报错: %v", err)
+	}
+
+	// flat 布局下不含版本子目录，但仍有平台段
+	flatKey := "AutoPddTax/windows/amd64/app.exe"
+	if got, ok := store.get(flatKey); !ok || string(got) != string(fakeBinary(50)) {
+		t.Fatalf("flat 产物未按 {prefix}/{GOOS}/{GOARCH}/{文件名} 落位")
+	}
+	// 不应出现含版本的旧式 key
+	if _, ok := store.get("AutoPddTax/2.0.0/windows/amd64/app.exe"); ok {
+		t.Fatalf("flat 布局不应包含版本子目录")
+	}
+
+	// version.json 里 download_url 也应为 flat key
+	raw, ok := store.get("AutoPddTax/version.json")
+	if !ok {
+		t.Fatal("version.json 未上传")
+	}
+	var manifest VersionInfo
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		t.Fatalf("version.json 解析失败: %v", err)
+	}
+	win := manifest.Platforms["windows/amd64"]
+	if win == nil || win.DownloadURL != flatKey {
+		t.Fatalf("flat 模式 windows 平台 download_url 不正确: %+v", win)
 	}
 }
 

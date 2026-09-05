@@ -96,11 +96,11 @@ platforms 必需，key 为 GOOS/GOARCH；每个平台条目必须含 download_ur
   "release_notes": "修复了 6 月账单导出的合计行错误",
   "platforms": {
     "windows/amd64": {
-      "download_url": "AutoPddTax/2.0.0/拼多多商店自动开票系统.exe",
+      "download_url": "AutoPddTax/2.0.0/windows/amd64/拼多多商店自动开票系统.exe",
       "checksum": "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
     },
     "linux/amd64": {
-      "download_url": "AutoPddTax/2.0.0/syncledger-linux",
+      "download_url": "AutoPddTax/2.0.0/linux/amd64/syncledger-linux",
       "checksum": "sha256:fedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321"
     }
   }
@@ -174,22 +174,50 @@ cosup-publish \
 
 - `-asset` 可多次（每个平台一条）；`-bucket` 与密钥缺省时回退到环境变量
   `COS_BUCKET` / `COS_SECRET_ID` / `COS_SECRET_KEY`，避免密码进命令行历史。
-- 产物上传到 `{Prefix}/{Version}/{文件名}`（版本子目录，防同名覆盖）；version.json 上传到 `{Prefix}/version.json`。
+- 产物上传到 `{Prefix}/{Version}/{GOOS}/{GOARCH}/{文件名}`（版本 + 平台双层子目录，
+  防多平台同名覆盖）；加 `-flat` 则改为 `{Prefix}/{GOOS}/{GOARCH}/{文件名}`（去版本段，
+  桶只留最新，不保留历史）。version.json 固定上传到 `{Prefix}/version.json`。
 - 顺序自动处理：**先全部产物、后 version.json**，旧客户端不会拿到指向 404 的地址。
 
-### 接入 build.sh 自动发布
+### 接入 build.sh / deploy.sh（建议把构建与发布拆成两个脚本）
+
+推荐**构建与发布分开**，职责单一、可只构建不上传、可单独重发某版本。
+版本号**不依赖 git tag**：以客户端 `internal/update` 里的 `var Version` 为基准，build 时把
+最后一段（PATCH）数字 +1、注入构建并回写，从而每次构建自动递增。
 
 ```sh
-# build.sh（片段）
-V=$(git describe --tags --always 2>/dev/null || echo dev)
-go build -trimpath -ldflags "-s -w -H windowsgui -X autopddtax/internal/update.Version=$V" \
+# build.sh —— 只构建，不发布；修改前先确保 internal/update/update.go 里 Version 为三段数字（如 1.0.0）
+#!/usr/bin/env bash
+set -e
+UP="$PWD/internal/update/update.go"
+CUR=$(grep -oE '^var Version = "[^"]*"' "$UP" | sed -E 's/.*"([^"]*)"/\1/')
+echo "$CUR" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "Version 非三段数字" >&2; exit 1; }
+MAJOR=$(echo "$CUR"|cut -d. -f1); MINOR=$(echo "$CUR"|cut -d. -f2); PATCH=$(echo "$CUR"|cut -d. -f3)
+NEXT="$MAJOR.$MINOR.$((PATCH+1))"
+go build -trimpath -ldflags "-s -w -H windowsgui -X autopddtax/internal/update.Version=$NEXT" \
   -o "dist/拼多多商店自动开票系统.exe" .
+sed -i "s|^var Version = \"[^\"]*\"|var Version = \"$NEXT\"|" "$UP"   # 回写，下次构建继续 +1
+
+# deploy.sh —— 专用发布：读 dist/ 产物上传，桶地址与密钥写死，版本读 update.go
+#!/usr/bin/env bash
+BUCKET="https://bucket-appid.cos.ap-guangzhou.myqcloud.com"   # 与 update 模块的 bucketRoot 一致
+PREFIX="AutoPddTax"
+SECRET_ID="AKID..."    # 私有写所需；客户端读不涉及
+SECRET_KEY="..."       # 写死进脚本即可（仓库私有）
+V=$(grep -oE '^var Version = "[^"]*"' internal/update/update.go | sed -E 's/.*"([^"]*)"/\1/')
 go run github.com/leafsnow/cos-updater/cmd/publish \
-  -prefix AutoPddTax -version "$V" \
+  -bucket "$BUCKET" -prefix "$PREFIX" -version "$V" \
+  -secret-id "$SECRET_ID" -secret-key "$SECRET_KEY" \
   -asset "windows/amd64=dist/拼多多商店自动开票系统.exe" -note "v$V 自动发布"
 ```
 
-`-ldflags -X` 把版本号注入客户端，`-version "$V"` 把同一版本号写进 version.json，二者一致。
+- `-ldflags -X` 把 `$NEXT` 注入客户端，deploy 的 `-version "$V"` 读同一份 update.go（此时已被 build 回写为
+  `$NEXT`），二者一致，客户端展示的版本与 version.json 里的版本永远吻合。
+- **桶地址**与**密钥**都直接写死进 deploy.sh，并与客户端 `internal/update` 的 `bucketRoot` 常量一致，
+  避免双份维护；`-bucket` 也可省略改交环境变量 `COS_BUCKET`。
+- **版本号权威来源 = update.go 的 `var Version`**：build 读它、PATCH+1 后回写，源码里的数字即
+  「上一个已发布版本」。deploy 读同一份源码作为发布版本，`-v` 仍可手动覆盖（重发历史版本用）。
+- 密钥写死进脚本后，deploy 不再读环境变量；若改回环境变量，缺省时 deploy.sh 应安全跳过。
 
 ### Publish 库 API（把发布逻辑内嵌进自有工具时用）
 
@@ -199,6 +227,7 @@ type PublishAsset struct {
 }
 type PublishConfig struct {
 	BucketURL, Prefix, Version string  // Prefix = 程序在桶下的子目录名
+	FlatLayout bool                   // true: 产物路径不带版本子目录
 	ReleaseNotes, SecretID, SecretKey string
 }
 err := cosupdater.Publish(ctx, cfg, []cosupdater.PublishAsset{{GOOS: "windows", GOARCH: "amd64", FilePath: "dist/app.exe"}})
@@ -217,8 +246,10 @@ COS 签名 URL 形态、平台选择、完整更新流程（公有读/私有读�
 Windows 手动验证清单（自动化测试无法覆盖的环节）：
 
 1. 替换正在运行的 exe：自更新 + Restart() 后确认无崩溃且新版本生效
-2. 私有读桶实测：签名 URL 对真实 COS 服务的兼容性无法用 httptest 覆盖，
-   发布前务必用真实私有桶验证一次；403 = 签名算法/密钥/时钟偏差问题
+2. 私有读桶实测：签名 URL 对真实 COS 服务的兼容性无法用 httptest 覆盖，已用真实桶验证
+   GET / PUT / DELETE 及含中文对象键的签名均可正常使用。若遇 403，多为密钥、时钟偏差，
+   或对象键含中文——签名 HttpString 的 UriPathname 须用「URL 解码后的原始字节」（原文，
+   含中文/空格），而非 URL 编码形式（见 cosauth.go）。
 3. 大文件进度回调：观察 OnProgress 触发频率与最终 100% 补发
 4. Unix 权限：Linux/macOS 上更新后确认可执行权限保持 0755
 
