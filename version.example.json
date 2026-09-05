@@ -1,0 +1,14 @@
+{
+  "version": "2.0.0",
+  "release_notes": "修复了 6 月账单导出的合计行错误",
+  "platforms": {
+    "windows/amd64": {
+      "download_url": "AutoPddTax/2.0.0/拼多多商店自动开票系统.exe",
+      "checksum": "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+    },
+    "linux/amd64": {
+      "download_url": "AutoPddTax/2.0.0/syncledger-linux",
+      "checksum": "sha256:fedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321"
+    }
+  }
+}

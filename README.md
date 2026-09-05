@@ -13,6 +13,9 @@
 - **可取消**：所有 API 接受 context.Context，GUI 的取消按钮就是一次 cancel()
 - **多平台**：version.json 内建 platforms 映射，按 GOOS/GOARCH 自动选择产物
 - **一键重启**：内置 Restart()，处理 Windows 中文文件名、等待旧进程退出与 cwd 继承
+- **发布工具**：内置 Publish API 与通用发布子命令，上传产物、自动计算校验和、生成并上传 version.json
+  —— 配合 build.sh 一句命令完成「构建 + 自动发布新版本」
+- **一桶多程序**：桶根地址全局唯一，每个程序只用一个 Prefix（桶下子目录名）区分，新程序接入近乎零配置
 
 ## 安装
 
@@ -81,9 +84,11 @@ func main() {
 
 ## version.json 规范
 
-放在桶内 Config.VersionFilePath 处。platforms 必需，key 为 GOOS/GOARCH；
-每个平台条目必须含 download_url（桶内相对路径，或绝对 URL——绝对 URL 仅公有读模式允许）
-与 checksum（强制，格式 sha256:<64位十六进制>）。
+放在桶内 `{Prefix}/version.json`（Prefix 即该程序在桶根下的子目录名）。
+仓库附有可直接复制改用的示例：[version.example.json](version.example.json)。
+
+platforms 必需，key 为 GOOS/GOARCH；每个平台条目必须含 download_url（**相对桶根的路径**，
+含 Prefix；或绝对 URL——绝对 URL 仅公有读模式允许）与 checksum（强制，格式 sha256:<64位十六进制>）。
 
 ```json
 {
@@ -91,11 +96,11 @@ func main() {
   "release_notes": "修复了 6 月账单导出的合计行错误",
   "platforms": {
     "windows/amd64": {
-      "download_url": "updates/2.0.0/合洋泰拼多多对账分析系统.exe",
+      "download_url": "AutoPddTax/2.0.0/拼多多商店自动开票系统.exe",
       "checksum": "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
     },
     "linux/amd64": {
-      "download_url": "updates/2.0.0/syncledger-linux",
+      "download_url": "AutoPddTax/2.0.0/syncledger-linux",
       "checksum": "sha256:fedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321"
     }
   }
@@ -109,6 +114,8 @@ sha256sum dist/xxx.exe                      # Linux/macOS
 Get-FileHash .\xxx.exe -Algorithm SHA256   # Windows PowerShell
 ```
 
+> 手动维护时通常不用手算 checksum：直接用库内的发布命令，它会自动计算并写入。
+
 ## API 一览
 
 | 函数 | 说明 |
@@ -118,6 +125,7 @@ Get-FileHash .\xxx.exe -Algorithm SHA256   # Windows PowerShell
 | `RunUpdate(ctx, cfg) error` | CheckUpdate + ApplyUpdate 的静默组合；无新版本时返回 nil |
 | `Restart() error` | 可选。以新程序重启让更新生效；Windows 安排延迟启动后返回，Unix 替换进程映像且不返回 |
 | `info.AssetForPlatform(goos, arch)` | 预检 platforms 中是否有指定平台的产物，便于更新前预判 |
+| `Publish(ctx, PublishConfig, []PublishAsset) error` | 发布端：上传产物 + 自动算校验和 + 生成上传 version.json。**先产物后 version.json**，避免旧客户端拉到 404 |
 
 ### 错误 sentinel（配合 errors.Is 使用）
 
@@ -145,19 +153,56 @@ Get-FileHash .\xxx.exe -Algorithm SHA256   # Windows PowerShell
 
 ## COS 桶准备
 
-- 公有读：直接使用，无需任何密钥。完整性由 HTTPS 与强制 SHA256 兜底，
-  这是分发自家 exe 场景的业界标准做法。
-- 私有读：提供 SecretID 与 SecretKey，库为每次请求生成 15 分钟有效的签名 URL。
-  注意：私有读模式下版本文件同样需要下载权限。
+- **多程序一个桶**：桶根地址全局唯一（如 `https://bucket-appid.cos.ap-guangzhou.myqcloud.com`），
+  桶下按程序各放一个子目录，目录名即该程序的 Prefix（如 `AutoPddTax`）。新程序接入只加一个新前缀。
+- **客户端读取（公有读）**：直接使用，无需任何密钥，完整性由 HTTPS 与强制 SHA256 兜底。
+- **客户端读取（私有读）**：提供 SecretID 与 SecretKey，库为每次请求生成 15 分钟有效的签名 URL。
+- **发布上传（私有写）**：需要 SecretID 与 SecretKey，仅发布端（build.sh）使用，**客户端一律不需要**。
 
-## 发布新版本流程
+## 发布新版本
 
-1. 构建：`./build.sh`（Fyne GUI 记得 `-H windowsgui` 与 `-ldflags "-X main.version=..."`）
-2. 计算校验和：sha256sum 或 PowerShell Get-FileHash
-3. 上传产物到桶，如 `updates/2.0.0/合洋泰拼多多对账分析系统.exe`（按版本子目录，避免同名覆盖）
-4. 生成并上传 version.json（platforms 中每个平台一条）。
-   顺序很重要：**必须先传产物、后传 version.json**——JSON 里写着产物的校验和，
-   先传 JSON 会让旧版本客户端拿到指向 404 的下载地址
+用内置的通用发布命令，一次完成「上传产物 + 自动算校验和 + 生成上传 version.json」：
+
+```bash
+cosup-publish \
+  -bucket https://bucket-appid.cos.ap-guangzhou.myqcloud.com \
+  -prefix AutoPddTax -version 2.0.0 \
+  -secret-id $COS_SECRET_ID -secret-key $COS_SECRET_KEY \
+  -asset "windows/amd64=dist/拼多多商店自动开票系统.exe" \
+  -note "发行说明"
+```
+
+- `-asset` 可多次（每个平台一条）；`-bucket` 与密钥缺省时回退到环境变量
+  `COS_BUCKET` / `COS_SECRET_ID` / `COS_SECRET_KEY`，避免密码进命令行历史。
+- 产物上传到 `{Prefix}/{Version}/{文件名}`（版本子目录，防同名覆盖）；version.json 上传到 `{Prefix}/version.json`。
+- 顺序自动处理：**先全部产物、后 version.json**，旧客户端不会拿到指向 404 的地址。
+
+### 接入 build.sh 自动发布
+
+```sh
+# build.sh（片段）
+V=$(git describe --tags --always 2>/dev/null || echo dev)
+go build -trimpath -ldflags "-s -w -H windowsgui -X autopddtax/internal/update.Version=$V" \
+  -o "dist/拼多多商店自动开票系统.exe" .
+go run github.com/leafsnow/cos-updater/cmd/publish \
+  -prefix AutoPddTax -version "$V" \
+  -asset "windows/amd64=dist/拼多多商店自动开票系统.exe" -note "v$V 自动发布"
+```
+
+`-ldflags -X` 把版本号注入客户端，`-version "$V"` 把同一版本号写进 version.json，二者一致。
+
+### Publish 库 API（把发布逻辑内嵌进自有工具时用）
+
+```go
+type PublishAsset struct {
+	GOOS, GOARCH, FilePath string      // 如 {"windows","amd64","dist/app.exe"}
+}
+type PublishConfig struct {
+	BucketURL, Prefix, Version string  // Prefix = 程序在桶下的子目录名
+	ReleaseNotes, SecretID, SecretKey string
+}
+err := cosupdater.Publish(ctx, cfg, []cosupdater.PublishAsset{{GOOS: "windows", GOARCH: "amd64", FilePath: "dist/app.exe"}})
+```
 
 ## 测试
 

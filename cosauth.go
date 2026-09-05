@@ -5,6 +5,7 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strings"
 	"time"
@@ -14,10 +15,17 @@ import (
 // 取 15 分钟以覆盖慢网络下的下载场景。
 const cosSignTTL = 15 * time.Minute
 
-// cosObjectURL 生成对象的访问 URL。
+// cosObjectURL 生成对象的访问 URL（GET 下载）。
 // 密钥为空时返回公有读直链；否则按腾讯云 COS XML API 的签名算法
 // 追加 q-sign-* 查询参数（私有读）。now 由调用方注入以便测试。
 func cosObjectURL(bucketURL, objectKey, secretID, secretKey string, now time.Time) (string, error) {
+	return cosObjectURLMethod(http.MethodGet, bucketURL, objectKey, secretID, secretKey, now)
+}
+
+// cosObjectURLMethod 与 cosObjectURL 相同，但允许指定 HTTP 方法。
+// 客户端下载走 GET；发布上传走 PUT（COS 的预签名 URL 会按方法校验签名，
+// 二者共享同一套 q-sign-* 计算，仅 httpString 中的方法行不同）。
+func cosObjectURLMethod(method, bucketURL, objectKey, secretID, secretKey string, now time.Time) (string, error) {
 	escapedKey := escapeCosKey(strings.TrimLeft(objectKey, "/"))
 	fileURL := strings.TrimRight(bucketURL, "/") + "/" + escapedKey
 	switch {
@@ -30,8 +38,8 @@ func cosObjectURL(bucketURL, objectKey, secretID, secretKey string, now time.Tim
 	keyTime := fmt.Sprintf("%d;%d", now.Unix(), now.Add(cosSignTTL).Unix())
 	signKey := hmacSha1Hex(secretKey, keyTime)
 	// 未对任何 header 与 query 参数签名，故两个列表均为空；
-	// 签名对象仅覆盖方法、对象路径与时间戳。
-	httpString := "get\n/" + escapedKey + "\n\n\n"
+	// 签名对象仅覆盖方法、对象路径与时间戳。COS 签名要求方法用小写。
+	httpString := strings.ToLower(method) + "\n/" + escapedKey + "\n\n\n"
 	stringToSign := "sha1\n" + keyTime + "\n" + sha1Hex(httpString) + "\n"
 	signature := hmacSha1Hex(signKey, stringToSign)
 
