@@ -7,58 +7,75 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
-
-	"github.com/inconshreveable/go-update"
 )
 
-// ApplyUpdate 执行一次完整更新：下载 -> SHA256 校验 -> 原子替换。
+// NextExecutablePath 计算本次更新将要安装到的本地新程序路径。
 //
-// info 通常来自 CheckUpdate，也可手动构造。
-// 下载过程中按 64KB 粒度触发 cfg.OnProgress；ctx 取消时中断下载并返回其错误。
+// 规则：与当前运行程序（cfg.TargetPath，为空时取 os.Executable()）同目录，
+// 文件名为「原名去掉扩展名 + _v + 版本号 + 原扩展名」，如
+// "合洋泰销售提成分析工具_v1.0.3.exe"。版本号中的前导 'v' 会被去除，
+// 避免出现 "_vv1.0.3" 这类双 v 文件名。返回绝对路径。
+func NextExecutablePath(cfg *Config, info *VersionInfo) (string, error) {
+	targetPath := cfg.TargetPath
+	if targetPath == "" {
+		exe, err := os.Executable()
+		if err != nil {
+			return "", fmt.Errorf("获取当前程序路径失败: %w", err)
+		}
+		targetPath = exe
+	}
+	dir := filepath.Dir(targetPath)
+	base := filepath.Base(targetPath)
+	ext := filepath.Ext(base)
+	nameNoExt := strings.TrimSuffix(base, ext)
+	ver := strings.TrimPrefix(strings.TrimSpace(info.Version), "v")
+	return filepath.Join(dir, fmt.Sprintf("%s_v%s%s", nameNoExt, ver, ext)), nil
+}
+
+// ApplyUpdate 执行一次完整更新：下载 -> SHA256 校验 -> 安装到同目录独立版本文件。
 //
-// 失败保证：校验不通过或下载中断时，原文件不会被改动，临时文件已被清理；
-// 替换由 go-update 原子完成，失败时同样保留原文件。
-// Unix 系统下替换成功后会补一次 chmod 0755 确保可执行权限。
-func ApplyUpdate(ctx context.Context, cfg *Config, info *VersionInfo) error {
+// 本函数不再原地替换正在运行的程序（旧 go-update 方案在 Windows 上因「正在运行的
+// exe 只能重命名不能覆盖」而被迫把老程序改名成 .old 并加隐藏属性，且替换运行中的
+// 进程后重启会拒绝访问）。新方案把新版下载到带版本号的独立文件（见
+// NextExecutablePath），运行中的原程序保持不变、不被改名、不被隐藏；调用方拿到返回
+// 的新路径后用 Restart 启动它即可生效。
+//
+// 失败保证：校验不通过或下载中断时，原程序不会被改动，临时文件已被清理；安装失败时
+// 同样保留原程序。成功时返回新程序绝对路径。
+func ApplyUpdate(ctx context.Context, cfg *Config, info *VersionInfo) (string, error) {
 	if err := cfg.validate(); err != nil {
-		return err
+		return "", err
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	asset, err := info.assetForCurrentPlatform()
 	if err != nil {
-		return err
+		return "", err
 	}
 	wantSum, err := parseChecksum(asset.Checksum)
 	if err != nil {
-		return err
+		return "", err
 	}
 
-	targetPath := cfg.TargetPath
-	if targetPath == "" {
-		exe, err := os.Executable()
-		if err != nil {
-			return fmt.Errorf("获取当前程序路径失败: %w", err)
-		}
-		targetPath = exe
-	}
-	// go-update 替换前需要先打开原文件，提前检查以给出可读的错误。
-	if _, err := os.Stat(targetPath); err != nil {
-		return fmt.Errorf("目标文件 %s 不存在或不可访问（自更新要求目标文件已存在）: %w", targetPath, err)
+	newPath, err := NextExecutablePath(cfg, info)
+	if err != nil {
+		return "", err
 	}
 
 	fileURL, err := resolveFileURL(cfg, asset.DownloadURL)
 	if err != nil {
-		return err
+		return "", err
 	}
 
-	tmp, err := os.CreateTemp("", "cos-updater-*")
+	// 临时文件建在与新程序同目录，保证最终 rename 不发生跨盘移动。
+	tmp, err := os.CreateTemp(filepath.Dir(newPath), ".cosup-*.tmp")
 	if err != nil {
-		return fmt.Errorf("创建临时文件失败: %w", err)
+		return "", fmt.Errorf("创建临时文件失败: %w", err)
 	}
 	tmpName := tmp.Name()
 	replaced := false
@@ -70,34 +87,33 @@ func ApplyUpdate(ctx context.Context, cfg *Config, info *VersionInfo) error {
 	}()
 
 	if err := downloadToFile(ctx, fileURL, tmp, cfg.OnProgress); err != nil {
-		return err
+		return "", err
 	}
 	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("写入临时文件失败: %w", err)
+		return "", fmt.Errorf("写入临时文件失败: %w", err)
 	}
 
 	if err := verifyChecksum(tmpName, wantSum); err != nil {
-		return err
+		return "", err
 	}
 
-	patch, err := os.Open(tmpName)
-	if err != nil {
-		return fmt.Errorf("打开临时文件失败: %w", err)
+	// 安装到新路径。同版本文件可能已存在（重装），Windows 上 rename 到已存在目标会
+	// 失败，故先尝试删除旧目标再落位。运行中的原程序（不带版本号）不受影响。
+	if err := os.Rename(tmpName, newPath); err != nil {
+		if rmErr := os.Remove(newPath); rmErr == nil {
+			if err2 := os.Rename(tmpName, newPath); err2 != nil {
+				return "", fmt.Errorf("安装新版本失败: %w", err2)
+			}
+		} else {
+			return "", fmt.Errorf("安装新版本失败: %w", err)
+		}
 	}
-	// go-update 不负责关闭 patch。
-	if err := update.Apply(patch, update.Options{TargetPath: targetPath}); err != nil {
-		patch.Close()
-		return fmt.Errorf("替换目标文件失败: %w", err)
-	}
-	patch.Close()
-
-	os.Remove(tmpName) // 临时文件已完成使命，清理失败不影响更新结果
 	replaced = true
 
 	if runtime.GOOS != "windows" {
-		_ = os.Chmod(targetPath, 0755)
+		_ = os.Chmod(newPath, 0755)
 	}
-	return nil
+	return newPath, nil
 }
 
 // verifyChecksum 计算文件 SHA256 并与期望摘要比较。

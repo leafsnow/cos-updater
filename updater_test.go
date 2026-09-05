@@ -192,25 +192,35 @@ func TestApplyUpdateFullFlow(t *testing.T) {
 	cfg.TargetPath = target
 	cfg.OnProgress = func(downloaded, total int64) {}
 
-	if err := ApplyUpdate(context.Background(), cfg, &VersionInfo{
+	newPath, err := ApplyUpdate(context.Background(), cfg, &VersionInfo{
 		Version: "2.0.0",
 		Platforms: map[string]*PlatformAsset{
 			runtime.GOOS + "/" + runtime.GOARCH: {DownloadURL: "app/版本2.exe", Checksum: mustChecksum(bin)},
 		},
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("ApplyUpdate 报错: %v", err)
 	}
 
-	got, err := os.ReadFile(target)
+	// 新方案：新版安装到带版本号的独立文件，原程序保持不动、不隐藏。
+	if want := filepath.Join(filepath.Dir(target), "合洋泰对账系统_v2.0.0.exe"); newPath != want {
+		t.Fatalf("新程序路径预期 %s，得到 %s", want, newPath)
+	}
+	got, err := os.ReadFile(newPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if string(got) != string(bin) {
-		t.Fatal("目标文件内容未被替换为新版本")
+		t.Fatal("新版本文件内容应与下载内容一致")
+	}
+	// 原程序不被替换、不被改名。
+	orig, _ := os.ReadFile(target)
+	if string(orig) != "old-binary" {
+		t.Fatal("原程序文件不应被改动（不替换、不隐藏）")
 	}
 	// Windows 上可执行位无意义，Unix 上由库保证 0755。
 	if runtime.GOOS != "windows" {
-		fi, _ := os.Stat(target)
+		fi, _ := os.Stat(newPath)
 		if fi.Mode().Perm() != 0755 {
 			t.Fatalf("期望权限 0755，得到 %v", fi.Mode().Perm())
 		}
@@ -236,7 +246,7 @@ func TestApplyUpdateProgressCallback(t *testing.T) {
 		lastDownloaded, lastTotal = d, total
 	}
 
-	if err := ApplyUpdate(context.Background(), cfg, &VersionInfo{
+	if _, err := ApplyUpdate(context.Background(), cfg, &VersionInfo{
 		Version: "2.0.0",
 		Platforms: map[string]*PlatformAsset{
 			runtime.GOOS + "/" + runtime.GOARCH: {DownloadURL: "app.exe", Checksum: mustChecksum(bin)},
@@ -278,7 +288,7 @@ func TestApplyUpdateFailures(t *testing.T) {
 		badSum := "sha256:" + strings.Repeat("00", 32)
 		cfg := baseCfg(bucket)
 		cfg.TargetPath = target
-		err := ApplyUpdate(context.Background(), cfg, newInfo("app.exe", badSum))
+		_, err := ApplyUpdate(context.Background(), cfg, newInfo("app.exe", badSum))
 		if !errors.Is(err, ErrChecksumMismatch) {
 			t.Fatalf("期望 ErrChecksumMismatch，得到 %v", err)
 		}
@@ -292,7 +302,7 @@ func TestApplyUpdateFailures(t *testing.T) {
 		bucket, _ := newFakeCOS(t, map[string][]byte{"app.exe": bin}, false)
 		cfg := baseCfg(bucket)
 		cfg.TargetPath = filepath.Join(t.TempDir(), "target.bin")
-		if err := ApplyUpdate(context.Background(), cfg, newInfo("app.exe", "")); !errors.Is(err, ErrChecksumRequired) {
+		if _, err := ApplyUpdate(context.Background(), cfg, newInfo("app.exe", "")); !errors.Is(err, ErrChecksumRequired) {
 			t.Fatalf("期望 ErrChecksumRequired，得到 %v", err)
 		}
 	})
@@ -316,7 +326,7 @@ func TestApplyUpdateFailures(t *testing.T) {
 		cfg := baseCfg(bucket)
 		cfg.TargetPath = filepath.Join(t.TempDir(), "target.bin")
 		os.WriteFile(cfg.TargetPath, []byte("old"), 0644)
-		err := ApplyUpdate(context.Background(), cfg, newInfo("missing.exe", mustChecksum(bin)))
+		_, err := ApplyUpdate(context.Background(), cfg, newInfo("missing.exe", mustChecksum(bin)))
 		if err == nil || !strings.Contains(err.Error(), "HTTP 404") {
 			t.Fatalf("期望 HTTP 404 错误，得到 %v", err)
 		}
@@ -327,7 +337,7 @@ func TestApplyUpdateFailures(t *testing.T) {
 		cfg.SecretID, cfg.SecretKey = "id", "key"
 		cfg.TargetPath = filepath.Join(t.TempDir(), "target.bin")
 		os.WriteFile(cfg.TargetPath, []byte("old"), 0644)
-		err := ApplyUpdate(context.Background(), cfg, newInfo("https://evil.example.com/app.exe", mustChecksum(bin)))
+		_, err := ApplyUpdate(context.Background(), cfg, newInfo("https://evil.example.com/app.exe", mustChecksum(bin)))
 		if !errors.Is(err, ErrInvalidDownloadURL) {
 			t.Fatalf("期望 ErrInvalidDownloadURL，得到 %v", err)
 		}
@@ -354,12 +364,24 @@ func TestPrivateBucketSignedRequests(t *testing.T) {
 	}
 	cfg.OnProgress = func(d, total int64) {}
 
-	if err := RunUpdate(context.Background(), cfg); err != nil {
-		t.Fatalf("私有读 RunUpdate 报错: %v", err)
+	has, info, err := CheckUpdate(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("私有读 CheckUpdate 报错: %v", err)
 	}
-	got, err := os.ReadFile(cfg.TargetPath)
+	if !has {
+		t.Fatal("期望私有读下检查到更新")
+	}
+	newPath, err := ApplyUpdate(context.Background(), cfg, info)
+	if err != nil {
+		t.Fatalf("私有读 ApplyUpdate 报错: %v", err)
+	}
+	got, err := os.ReadFile(newPath)
 	if err != nil || string(got) != string(bin) {
 		t.Fatalf("私有读更新结果不正确: %v", err)
+	}
+	// 原程序文件保持原样、不被替换。
+	if orig, _ := os.ReadFile(cfg.TargetPath); string(orig) != "old" {
+		t.Fatal("私有读更新后原程序文件不应被改动")
 	}
 }
 
@@ -389,7 +411,7 @@ func TestDownloadContextCancel(t *testing.T) {
 	if err := os.WriteFile(cfg.TargetPath, []byte("old"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	err := ApplyUpdate(ctx, cfg, &VersionInfo{
+	_, err := ApplyUpdate(ctx, cfg, &VersionInfo{
 		Version: "2.0.0",
 		Platforms: map[string]*PlatformAsset{
 			runtime.GOOS + "/" + runtime.GOARCH: {DownloadURL: "big.exe", Checksum: mustChecksum(fakeBinary(1))},

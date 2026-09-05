@@ -1,5 +1,5 @@
 // Package cosupdater 提供基于腾讯云 COS 的极简程序自更新能力：
-// 检查新版本 -> 下载 -> SHA256 校验 -> 原子替换当前程序，
+// 检查新版本 -> 下载 -> SHA256 校验 -> 安装到独立版本文件（不动、不隐藏运行中的原程序），
 // 支持下载进度回调与 ctx 取消，公有读/私有读桶均可用（私有读为手写签名，零 SDK 依赖）。
 //
 // 最小用法：
@@ -78,5 +78,6 @@ func RunUpdate(ctx context.Context, cfg *Config) error {
 	if !has {
 		return nil
 	}
-	return ApplyUpdate(ctx, cfg, info)
+	_, err = ApplyUpdate(ctx, cfg, info)
+	return err
 }
