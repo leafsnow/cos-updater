@@ -5,15 +5,19 @@ package cosupdater
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"syscall"
 )
 
-// restartProcess 在 Windows 上安排延迟启动新 exe：
-// 用 ping 空转约 1-2 秒等待当前进程退出（timeout 命令在无控制台的 GUI 进程中
-// 会因 stdin 重定向而报错，ping 无此问题），随后 start 启动新程序。
-// path 为空时回退到 os.Executable()。start 的第一个空参数 "" 是窗口标题占位，
-// 保证含空格/中文的 exe 路径被整体引用。
+// restartProcess 在 Windows 上直接启动新 exe。
+//
+// 旧实现是 `cmd /c ping ... & start "" "<exe>"`，在含中文/空格的路径上，
+// cmd 对引号与路径的二次解析会错乱，可能把目标解析成只剩反斜杠的"路径"，
+// 表现为 Windows 弹出「找不到 '\\' 文件」。改用 os.StartProcess（CreateProcess）
+// 直接启动：路径原样交给系统，无 cmd/start 解释器介入，中文、空格、长路径均正确。
+//
+// CREATE_NEW_PROCESS_GROUP|DETACHED_PROCESS 让新进程独立于本进程组与控制台——
+// 本进程（运行中的老程序，已被 Retire 改名成 .old）随即 os.Exit(0)，不影响新进程。
+// path 为空时回退到 os.Executable()。
 func restartProcess(path string) error {
 	exe := path
 	if exe == "" {
@@ -23,12 +27,18 @@ func restartProcess(path string) error {
 			return fmt.Errorf("获取当前程序路径失败: %w", err)
 		}
 	}
-	script := fmt.Sprintf(`ping -n 2 127.0.0.1 >nul & start "" "%s"`, exe)
-	cmd := exec.Command("cmd", "/c", script)
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("安排重启失败: %w", err)
+	attr := &os.ProcAttr{
+		Files: []*os.File{nil, nil, nil}, // 不继承父进程标准句柄
+		Sys: &syscall.SysProcAttr{
+			HideWindow:    true,
+			CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP,
+		},
 	}
-	go cmd.Wait() // 异步回收子进程资源
+	proc, err := os.StartProcess(exe, []string{exe}, attr)
+	if err != nil {
+		return fmt.Errorf("启动新版本失败: %w", err)
+	}
+	// 及时释放句柄：父进程即将退出，无需持有对新进程的引用，避免句柄遗留。
+	_ = proc.Release()
 	return nil
 }

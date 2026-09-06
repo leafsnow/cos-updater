@@ -36,11 +36,17 @@ func NextExecutablePath(cfg *Config, info *VersionInfo) (string, error) {
 	base := filepath.Base(targetPath)
 	ext := filepath.Ext(base)
 	stem := strings.TrimSuffix(base, ext)
-	// 剥掉带版本号后缀（如 "_v1.0.6"），得到稳定基础名，修复连续更新嵌套。
-	if i := strings.LastIndex(stem, "_v"); i >= 0 {
-		if _, err := version.NewVersion(stem[i+2:]); err == nil {
-			stem = stem[:i]
+	// 反复剥掉尾部 "_v<语义版本>" 后缀，直到无法再剥，得到稳定基础名。
+	// 否则连续的版本后缀（如 "…_v1.0.6_v1.0.7"）只会去掉最末一段，剩下
+	// "…_v1.0.6" 仍带版本号，连续更新会继续嵌套。循环确保剥到基础名。
+	for {
+		if i := strings.LastIndex(stem, "_v"); i >= 0 {
+			if _, err := version.NewVersion(stem[i+2:]); err == nil {
+				stem = stem[:i]
+				continue
+			}
 		}
+		break
 	}
 	return filepath.Join(dir, stem+ext), nil
 }

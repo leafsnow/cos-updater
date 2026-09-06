@@ -19,7 +19,13 @@ func TestNextExecutablePath(t *testing.T) {
 	}
 
 	// 基准名本身带版本号（旧版残留 / 连续更新）：应剥掉，不产生嵌套。
-	for _, base := range []string{"合洋泰软件_v1.0.6.exe", "合洋泰软件_v2.0.0.exe"} {
+	// 含连续嵌套（如 "_v1.0.6_v1.0.7"）与更长嵌套，都须剥到基础名，避免层层堆积。
+	for _, base := range []string{
+		"合洋泰软件_v1.0.6.exe",
+		"合洋泰软件_v2.0.0.exe",
+		"合洋泰软件_v1.0.6_v1.0.7.exe",
+		"合洋泰软件_v1.0.6_v1.0.7_v1.0.8.exe",
+	} {
 		got, _ := NextExecutablePath(&Config{TargetPath: filepath.Join("D:", "app", base)}, &VersionInfo{Version: "1.0.7"})
 		if want := filepath.Join("D:", "app", "合洋泰软件.exe"); got != want {
 			t.Fatalf("base=%s 期望固定名 %s，得到 %s", base, want, got)
