@@ -32,4 +32,8 @@ var (
 	// ErrInvalidDownloadURL 版本文件中的 download_url 非法
 	//（例如私有读模式下却给了绝对 URL，库无法对其签名）。
 	ErrInvalidDownloadURL = errors.New(errPrefix + "download_url 无效")
+
+	// ErrCDNFailed CDN 缓存刷新/预热存在失败项（某批提交失败或任务终态非 success）。
+	// 不阻断已成功的发布，调用方用它识别「CDN 环节未完全生效」。
+	ErrCDNFailed = errors.New(errPrefix + "CDN 刷新/预热存在失败项")
 )
