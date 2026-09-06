@@ -42,6 +42,8 @@ go get github.com/leafsnow/cos-updater
 | `Retire(path)` | 把正在运行的旧程序改名为同目录 `<原名>.old-<时间戳>`：名字唯一（冲突自动递增后缀）、保留多份、可回滚。已由 ApplyUpdate 落位前自动调用，可单独复用 |
 | `Restart(path ...string)` | 重启让更新生效；传新版本路径，为空时用 `os.Executable()`。Unix 替换进程映像且不返回，Windows 安排延迟启动后返回 |
 | `AssetForPlatform(info, goos, arch)` | 预检 platforms 中是否有指定平台的产物，便于更新前预判 |
+| `RefreshCDN(ctx, cfg, urls)` | 刷新 CDN 缓存（`PurgeUrlsCache`→轮询任务完成）。`urls` 可为绝对 URL 或相对对象键，需提供 `CDNConfig`（密钥复用 COS 账号），库内走腾讯云云 API 3.0 签名 |
+| `PrewarmCDN(ctx, cfg, urls)` | 预热 CDN 缓存（`PushUrlsCache`→轮询任务完成），把源站内容提前拉进边缘节点，加速客户端首次下载 |
 
 常见错误可用 `errors.Is` 判断，如 `ErrChecksumMismatch`、`ErrInvalidConfig`、`ErrPlatformNotSupported` 等。
 
@@ -65,6 +67,16 @@ cosup-publish \
 | `-asset` | 可多次，每个平台一条，格式 `GOOS/GOARCH=本地文件路径` |
 | `-note` | 可多次，每条对应 release_notes 数组的一项 |
 | `-flat` | 产物路径不带版本子目录（桶只留最新，不保留历史） |
+| `-cdn-domain` | CDN 访问域名；非空则发布成功后自动刷新/预热 CDN（缺省回退 `COS_CDN_DOMAIN`，为空则完全不触发） |
+| `-cdn-wait` | 是否等待 CDN 刷新/预热任务完成（默认 `true`）；`false` 则提交后立即返回 |
 
 - 上传到 `{Prefix}/{Version}/{GOOS}/{GOARCH}/{文件名}`（版本 + 平台双层子目录，防多平台同名覆盖）；加 `-flat` 改为 `{Prefix}/{GOOS}/{GOARCH}/{文件名}`。version.json 固定上传到 `{Prefix}/version.json`。
 - 顺序自动处理：**先全部产物、后 version.json**，旧客户端不会拿到指向 404 的地址。
+
+### CDN 缓存刷新/预热（可选）
+
+传入 `-cdn-domain`（或环境变量 `COS_CDN_DOMAIN`）后，发布上传成功会自动刷新/预热 CDN：
+- 恒定刷新 `{Prefix}/version.json`（固定路径，让客户端及时读到新 manifest）；
+- 产物按布局处理：默认布局**预热**（新 URL 无旧缓存）；`-flat` 布局**先刷新**（清旧缓存，避免客户端 SHA256 校验命中旧文件）**再预热**。
+
+CDN 用**腾讯云 CDN**（`cdn.tencentcloudapi.com`，云 API 3.0 签名，由库内 `RefreshCDN`/`PrewarmCDN` 实现），密钥复用 COS 的 SecretID/SecretKey。**默认关闭**——不传 `-cdn-domain` 则完全不触发，对无 CDN 用户零影响；CDN 失败**不阻断**发布，仅打印警告。
