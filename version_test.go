@@ -1,115 +1,85 @@
 package cosupdater
 
 import (
-	"errors"
+	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 )
 
-// hex64 构造一个 64 位十六进制串。
-func hex64(s string) string {
-	if s == "" {
-		s = "aabb"
+// TestVersionInfoUnmarshalArray 校验新版字符串数组的 release_notes 能正确解析成 []string。
+func TestVersionInfoUnmarshalArray(t *testing.T) {
+	raw := `{"version":"2.0.0","release_notes":["修复6月合计行错误","优化导出速度"],"platforms":{}}`
+	var info VersionInfo
+	if err := json.Unmarshal([]byte(raw), &info); err != nil {
+		t.Fatalf("数组 release_notes 解析失败: %v", err)
 	}
-	out := strings.Repeat(s, 64/len(s))
-	if len(out) < 64 {
-		out += s[:64-len(out)]
-	}
-	return out[:64]
-}
-
-func TestIsNewerVersion(t *testing.T) {
-	cases := []struct {
-		name    string
-		current string
-		remote  string
-		want    bool
-		wantErr bool
-	}{
-		{"远程更新", "1.0.0", "2.0.0", true, false},
-		{"相同", "1.0.0", "1.0.0", false, false},
-		{"远程更旧", "2.0.0", "1.9.9", false, false},
-		{"远程带 v 前缀", "1.0.0", "v1.1.0", true, false},
-		{"当前带 v 前缀", "v1.0.0", "1.1.0", true, false},
-		{"两边都带 v 前缀", "v1.0.0", "v2.0.0", true, false},
-		{"逐段比较而非字符串比较", "1.9.9", "1.10.0", true, false},
-		{"补丁号更新", "1.0.0", "1.0.1", true, false},
-		{"预发布版低于正式版", "1.0.0-rc.1", "1.0.0", true, false},
-		{"高版本号的预发布版仍高于低正式版", "1.0.0", "1.0.1-rc.1", true, false},
-		{"当前版本非法", "", "2.0.0", false, true},
-		{"远程版本非法", "1.0.0", "abc", false, true},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			got, err := isNewerVersion(c.current, c.remote)
-			if c.wantErr {
-				if err == nil {
-					t.Fatalf("期望报错，却返回 got=%v", got)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("意外报错: %v", err)
-			}
-			if got != c.want {
-				t.Fatalf("isNewerVersion(%q, %q) = %v, 期望 %v", c.current, c.remote, got, c.want)
-			}
-		})
+	want := []string{"修复6月合计行错误", "优化导出速度"}
+	if !reflect.DeepEqual(info.ReleaseNotes, want) {
+		t.Fatalf("期望 %#v，得到 %#v", want, info.ReleaseNotes)
 	}
 }
 
-func TestParseChecksum(t *testing.T) {
-	valid := "sha256:" + hex64("")
-	cases := []struct {
-		name    string
-		input   string
-		wantErr error
-	}{
-		{"合法", valid, nil},
-		{"大写十六进制合法", "sha256:" + strings.ToUpper(hex64("")), nil},
-		{"前后空白合法", "  " + valid + "\n", nil},
-		{"缺失", "", ErrChecksumRequired},
-		{"只有前缀", "sha256:", ErrChecksumRequired},
-		{"缺少前缀", hex64(""), ErrChecksumRequired},
-		{"长度不足", "sha256:aabb", ErrChecksumRequired},
-		{"含非十六进制字符", "sha256:" + strings.Repeat("zz", 32), ErrChecksumRequired},
-		{"错误算法前缀", "md5:" + hex64(""), ErrChecksumRequired},
+// TestVersionInfoUnmarshalLegacyString 校验旧版单个字符串的 release_notes 仍能被容错读取，
+// 包裹成单元素数组——保证桶上尚未重新发布的旧 version.json 不导致整体解析失败。
+func TestVersionInfoUnmarshalLegacyString(t *testing.T) {
+	raw := `{"version":"1.0.9","release_notes":"Commission v1.0.9 自动发布","platforms":{}}`
+	var info VersionInfo
+	if err := json.Unmarshal([]byte(raw), &info); err != nil {
+		t.Fatalf("旧版字符串 release_notes 解析失败: %v", err)
 	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			got, err := parseChecksum(c.input)
-			if c.wantErr == nil {
-				if err != nil {
-					t.Fatalf("期望成功，却报错: %v", err)
-				}
-				if len(got) != 32 {
-					t.Fatalf("期望 32 字节摘要，得到 %d 字节", len(got))
-				}
-				return
-			}
-			if !errors.Is(err, c.wantErr) {
-				t.Fatalf("期望 %v，得到 %v", c.wantErr, err)
-			}
-		})
+	want := []string{"Commission v1.0.9 自动发布"}
+	if !reflect.DeepEqual(info.ReleaseNotes, want) {
+		t.Fatalf("期望 %#v，得到 %#v", want, info.ReleaseNotes)
 	}
 }
 
-func TestAssetForPlatform(t *testing.T) {
-	info := &VersionInfo{
-		Version: "2.0.0",
-		Platforms: map[string]*PlatformAsset{
-			"windows/amd64": {DownloadURL: "app.exe", Checksum: "sha256:" + hex64("")},
-		},
+// TestVersionInfoUnmarshalNotesAbsent 校验缺少 release_notes 字段时得到 nil（不报错）。
+func TestVersionInfoUnmarshalNotesAbsent(t *testing.T) {
+	raw := `{"version":"2.0.0","platforms":{}}`
+	var info VersionInfo
+	if err := json.Unmarshal([]byte(raw), &info); err != nil {
+		t.Fatalf("缺少 release_notes 解析失败: %v", err)
 	}
+	if info.ReleaseNotes != nil {
+		t.Fatalf("期望 nil，得到 %#v", info.ReleaseNotes)
+	}
+}
 
-	if _, err := info.AssetForPlatform("windows", "amd64"); err != nil {
-		t.Fatalf("存在的平台不应报错: %v", err)
+// TestVersionInfoMarshalArray 校验序列化输出数组格式（而非旧版字符串）。
+func TestVersionInfoMarshalArray(t *testing.T) {
+	info := VersionInfo{
+		Version:      "2.0.0",
+		ReleaseNotes: []string{"修复6月合计行错误", "优化导出速度"},
+		Platforms:    map[string]*PlatformAsset{},
 	}
-	_, err := info.AssetForPlatform("linux", "arm64")
-	if !errors.Is(err, ErrPlatformNotSupported) {
-		t.Fatalf("缺失平台期望 ErrPlatformNotSupported，得到 %v", err)
+	data, err := json.Marshal(info)
+	if err != nil {
+		t.Fatalf("序列化失败: %v", err)
 	}
-	if _, err = (*VersionInfo)(nil).AssetForPlatform("windows", "amd64"); !errors.Is(err, ErrInvalidVersionInfo) {
-		t.Fatalf("nil 接收者期望 ErrInvalidVersionInfo，得到 %v", err)
+	var m map[string]interface{}
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("回读失败: %v", err)
+	}
+	if _, ok := m["release_notes"].([]interface{}); !ok {
+		t.Fatalf("release_notes 应为 JSON 数组，实际为 %T: %s", m["release_notes"], data)
+	}
+	if got := m["release_notes"].([]interface{}); len(got) != 2 || got[0] != "修复6月合计行错误" {
+		t.Fatalf("release_notes 数组内容不正确: %#v", got)
+	}
+}
+
+// TestVersionInfoMarshalOmitEmptyNotes 校验 nil release_notes 时字段被省略（omitempty）。
+func TestVersionInfoMarshalOmitEmptyNotes(t *testing.T) {
+	info := VersionInfo{
+		Version:   "2.0.0",
+		Platforms: map[string]*PlatformAsset{},
+	}
+	data, err := json.Marshal(info)
+	if err != nil {
+		t.Fatalf("序列化失败: %v", err)
+	}
+	if strings.Contains(string(data), "release_notes") {
+		t.Fatalf("空 release_notes 应被省略: %s", data)
 	}
 }

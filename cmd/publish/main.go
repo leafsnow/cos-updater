@@ -6,7 +6,7 @@
 //	cosup-publish -prefix AutoPddTax -version 1.0.0 \
 //	  -secret-id $COS_SECRET_ID -secret-key $COS_SECRET_KEY \
 //	  -bucket https://gxhyt-1303168605.cos.ap-guangzhou.myqcloud.com \
-//	  -asset "windows/amd64=dist/拼多多商店自动开票系统.exe" [-note ...] [-flat]
+//	  -asset "windows/amd64=dist/拼多多商店自动开票系统.exe" [-note 说明] [-note 说明] [-flat]
 //
 // -bucket / 密钥缺省时依次回退到环境变量 COS_BUCKET / COS_SECRET_ID / COS_SECRET_KEY。
 // 同一个桶下放多个程序时，每个程序共用桶根地址、仅以不同的 -prefix 区分。
@@ -24,16 +24,21 @@ import (
 
 var (
 	assets []cosupdater.PublishAsset
+	notes  []string
 )
 
 func main() {
 	bucket := flag.String("bucket", "", "COS 桶根地址（缺省取环境变量 COS_BUCKET）")
 	prefix := flag.String("prefix", "", "程序在桶下的子目录名（如 AutoPddTax），必填")
 	version := flag.String("version", "", "本次发布的版本号，必填")
-	note := flag.String("note", "", "发行说明（可选）")
 	flat := flag.Bool("flat", false, "产物路径不带版本子目录（仅 {prefix}/{GOOS}/{GOARCH}/{文件名}，桶只留最新）")
 	secretID := flag.String("secret-id", "", "腾讯云 SecretID（缺省取 COS_SECRET_ID）")
 	secretKey := flag.String("secret-key", "", "腾讯云 SecretKey（缺省取 COS_SECRET_KEY）")
+	flag.Func("note", "发行说明，每条一项（可多次），如 -note \"修复6月合计行错误\"",
+		func(s string) error {
+			notes = append(notes, s)
+			return nil
+		})
 	flag.Func("asset", "产物，格式 GOOS/GOARCH=文件路径（可多次），如 windows/amd64=dist/app.exe",
 		func(s string) error {
 			i := strings.Index(s, "=")
@@ -77,7 +82,7 @@ func main() {
 		Prefix:       *prefix,
 		Version:      *version,
 		FlatLayout:   *flat,
-		ReleaseNotes: *note,
+		ReleaseNotes: notes,
 		SecretID:     *secretID,
 		SecretKey:    *secretKey,
 	}

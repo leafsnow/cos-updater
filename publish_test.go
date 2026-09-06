@@ -90,7 +90,7 @@ func TestPublishUploadsArtifactsThenManifest(t *testing.T) {
 		BucketURL:    bucket,
 		Prefix:       "AutoPddTax",
 		Version:      "2.0.0",
-		ReleaseNotes: "修复合计行错误",
+		ReleaseNotes: []string{"修复合计行错误", "优化导出速度"},
 		SecretID:     "id",
 		SecretKey:    "key",
 	}
@@ -121,8 +121,11 @@ func TestPublishUploadsArtifactsThenManifest(t *testing.T) {
 	if err := json.Unmarshal(raw, &manifest); err != nil {
 		t.Fatalf("version.json 解析失败: %v", err)
 	}
-	if manifest.Version != "2.0.0" || manifest.ReleaseNotes != "修复合计行错误" {
-		t.Fatalf("version/release_notes 不正确: %+v", manifest)
+	if manifest.Version != "2.0.0" {
+		t.Fatalf("version 不正确: %+v", manifest)
+	}
+	if len(manifest.ReleaseNotes) != 2 || manifest.ReleaseNotes[0] != "修复合计行错误" || manifest.ReleaseNotes[1] != "优化导出速度" {
+		t.Fatalf("release_notes 数组不正确: %#v", manifest.ReleaseNotes)
 	}
 	win := manifest.Platforms["windows/amd64"]
 	if win == nil || win.DownloadURL != winKey {

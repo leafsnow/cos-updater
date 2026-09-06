@@ -84,7 +84,7 @@ func TestCheckUpdatePublic(t *testing.T) {
 	}
 	writeVersionFile(objects, "updates/version.json", VersionInfo{
 		Version:      "2.0.0",
-		ReleaseNotes: "修复合计行错误",
+		ReleaseNotes: []string{"修复合计行错误", "优化导出速度"},
 		Platforms: map[string]*PlatformAsset{
 			runtime.GOOS + "/" + runtime.GOARCH: {DownloadURL: "app_v2.exe", Checksum: mustChecksum(bin)},
 		},
@@ -98,8 +98,11 @@ func TestCheckUpdatePublic(t *testing.T) {
 	if !has {
 		t.Fatal("远程 2.0.0 > 本地 1.0.0，期望 has=true")
 	}
-	if info.Version != "2.0.0" || info.ReleaseNotes != "修复合计行错误" {
+	if info.Version != "2.0.0" {
 		t.Fatalf("版本信息解析不完整: %+v", info)
+	}
+	if len(info.ReleaseNotes) != 2 || info.ReleaseNotes[0] != "修复合计行错误" || info.ReleaseNotes[1] != "优化导出速度" {
+		t.Fatalf("release_notes 数组不正确: %#v", info.ReleaseNotes)
 	}
 }
 

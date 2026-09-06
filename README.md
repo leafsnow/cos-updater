@@ -78,10 +78,18 @@ platforms 必需，key 为 GOOS/GOARCH；每个平台条目必须含 download_ur
 含 Prefix；或绝对 URL——绝对 URL 仅公有读模式允许）与 checksum（强制，格式 sha256:<64位十六进制>）。
 `download_url` 指向的产物文件名即程序固定名（不带版本号）。
 
+`release_notes` 可选，类型为**字符串数组**——每条是一项独立的更新日志，供客户端更新窗口逐条展示。
+允许为空或缺省；客户端读取兼容旧版单个字符串（自动包裹成单元素数组），因此桶上暂未重新发布的
+旧 version.json 不会让客户端在解析时失败。
+
 ```json
 {
   "version": "2.0.0",
-  "release_notes": "修复了 6 月账单导出的合计行错误",
+  "release_notes": [
+    "修复了 6 月账单导出的合计行错误",
+    "优化导出速度",
+    "新增按店铺筛选"
+  ],
   "platforms": {
     "windows/amd64": {
       "download_url": "AutoPddTax/2.0.0/windows/amd64/AutoPddTax.exe",
@@ -148,11 +156,13 @@ cosup-publish \
   -prefix AutoPddTax -version 2.0.0 \
   -secret-id $COS_SECRET_ID -secret-key $COS_SECRET_KEY \
   -asset "windows/amd64=dist/AutoPddTax.exe" \
-  -note "发行说明"
+  -note "修复了 6 月账单导出的合计行错误" -note "优化导出速度"
 ```
 
-- `-asset` 可多次（每个平台一条）；`-bucket` 与密钥缺省时回退到环境变量
-  `COS_BUCKET` / `COS_SECRET_ID` / `COS_SECRET_KEY`，避免密码进命令行历史。
+- `-asset` 可多次（每个平台一条）；`-note` 也可多次，每条对应 release_notes 数组的一项
+  （想写多条更新日志就多传几个 `-note`，或一个都不传则数组为空）。
+  `-bucket` 与密钥缺省时回退到环境变量 `COS_BUCKET` / `COS_SECRET_ID` / `COS_SECRET_KEY`，
+  避免密码进命令行历史。
 - 产物上传到 `{Prefix}/{Version}/{GOOS}/{GOARCH}/{文件名}`（版本 + 平台双层子目录，
   防多平台同名覆盖）；加 `-flat` 则改为 `{Prefix}/{GOOS}/{GOARCH}/{文件名}`（去版本段，
   桶只留最新，不保留历史）。version.json 固定上传到 `{Prefix}/version.json`。
@@ -165,9 +175,10 @@ type PublishAsset struct {
 	GOOS, GOARCH, FilePath string      // 如 {"windows","amd64","dist/app.exe"}
 }
 type PublishConfig struct {
-	BucketURL, Prefix, Version string  // Prefix = 程序在桶下的子目录名
-	FlatLayout bool                   // true: 产物路径不带版本子目录
-	ReleaseNotes, SecretID, SecretKey string
+	BucketURL, Prefix, Version string    // Prefix = 程序在桶下的子目录名
+	FlatLayout bool                     // true: 产物路径不带版本子目录
+	ReleaseNotes []string               // 发行说明，每条一项（写入 release_notes 数组）
+	SecretID, SecretKey string
 }
 err := cosupdater.Publish(ctx, cfg, []cosupdater.PublishAsset{{GOOS: "windows", GOARCH: "amd64", FilePath: "dist/app.exe"}})
 ```

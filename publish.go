@@ -52,8 +52,9 @@ type PublishConfig struct {
 	//       短竞态，靠客户端校验失败重试兜底。
 	FlatLayout bool
 
-	// ReleaseNotes 发行说明，可选。
-	ReleaseNotes string
+	// ReleaseNotes 发行说明，可选。数组每条是一项独立的更新日志，写入 version.json 的
+	// release_notes（数组）。发布端用可重复的 -note 提供，每条一句。
+	ReleaseNotes []string
 
 	// SecretID 腾讯云 SecretID（私有写必需）。
 	SecretID string

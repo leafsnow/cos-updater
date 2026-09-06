@@ -2,6 +2,7 @@ package cosupdater
 
 import (
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"runtime"
@@ -27,7 +28,7 @@ type PlatformAsset struct {
 //
 //	{
 //	  "version": "2.0.0",
-//	  "release_notes": "修复了 6 月账单导出的合计行错误",
+//	  "release_notes": ["修复了 6 月账单导出的合计行错误", "优化导出速度"],
 //	  "platforms": {
 //	    "windows/amd64": { "download_url": "syncledger_v2.0.0.exe", "checksum": "sha256:..." },
 //	    "linux/amd64":   { "download_url": "syncledger_v2.0.0_linux", "checksum": "sha256:..." }
@@ -37,11 +38,56 @@ type VersionInfo struct {
 	// Version 远程最新版本号，与 Config.CurrentVersion 用相同规则比较。
 	Version string `json:"version"`
 
-	// ReleaseNotes 更新说明，可选。供确认弹窗展示。
-	ReleaseNotes string `json:"release_notes,omitempty"`
+	// ReleaseNotes 更新说明，可选。新版为字符串数组——每条是一条独立的更新日志，
+	// 供更新窗口逐条展示。写旁一律输出数组；读旁兼容旧版单个字符串（见 UnmarshalJSON），
+	// 保证桶上尚未重新发布的旧 version.json 不会让客户端整体 JSON 解析失败。
+	ReleaseNotes []string `json:"release_notes,omitempty"`
 
 	// Platforms 各平台的下载产物，key 为 "GOOS/GOARCH"（如 "windows/amd64"）。必需。
 	Platforms map[string]*PlatformAsset `json:"platforms"`
+}
+
+// UnmarshalJSON 对 release_notes 字段做容错解析：接受数组（新版）与单个字符串
+// （旧版）。v1.3.0 之后发布端只写数组；但桶上可能残留旧版单字符串 version.json，
+// 或客户端先行升级而 manifest 尚未重新发布。若不兼容字符串，客户端读取到旧
+// manifest 会因 JSON 类型不符而整体解析失败、无法检查更新。
+func (v *VersionInfo) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Version      string                    `json:"version"`
+		ReleaseNotes json.RawMessage           `json:"release_notes,omitempty"`
+		Platforms    map[string]*PlatformAsset `json:"platforms"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	v.Version = raw.Version
+	v.Platforms = raw.Platforms
+	if len(raw.ReleaseNotes) == 0 || string(raw.ReleaseNotes) == "null" {
+		v.ReleaseNotes = nil
+		return nil
+	}
+	notes, err := parseReleaseNotes(raw.ReleaseNotes)
+	if err != nil {
+		return fmt.Errorf("release_notes 格式不合法: %w", err)
+	}
+	v.ReleaseNotes = notes
+	return nil
+}
+
+// parseReleaseNotes 解析 release_notes：优先按字符串数组，失败则回退到旧版单字符串包成一条。
+func parseReleaseNotes(raw json.RawMessage) ([]string, error) {
+	var arr []string
+	if err := json.Unmarshal(raw, &arr); err == nil {
+		return arr, nil
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(s) == "" {
+		return nil, nil
+	}
+	return []string{s}, nil
 }
 
 // AssetForPlatform 返回指定平台的下载产物。

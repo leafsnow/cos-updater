@@ -1,6 +1,10 @@
 {
   "version": "2.0.0",
-  "release_notes": "修复了 6 月账单导出的合计行错误",
+  "release_notes": [
+    "修复了 6 月账单导出的合计行错误",
+    "优化导出速度",
+    "新增按店铺筛选"
+  ],
   "platforms": {
     "windows/amd64": {
       "download_url": "AutoPddTax/2.0.0/windows/amd64/拼多多商店自动开票系统.exe",
